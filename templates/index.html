@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hume EVI - Voice Chat</title>
+    <style>
+        body { font-family: 'Inter', system-ui, sans-serif; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .container { background: #1e293b; padding: 2rem; border-radius: 1rem; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); width: 400px; text-align: center; }
+        button { background: #3b82f6; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 0.5rem; cursor: pointer; font-size: 1rem; transition: background 0.2s; margin: 0.25rem; }
+        button:hover { background: #2563eb; }
+        button:disabled { background: #64748b; cursor: not-allowed; }
+        #stopButton { background: #ef4444; }
+        #stopButton:hover { background: #dc2626; }
+        .status { margin-top: 1rem; font-size: 0.875rem; color: #94a3b8; }
+        .status.active { color: #22c55e; }
+        .status.error { color: #ef4444; }
+        #logs { margin-top: 1.5rem; text-align: left; max-height: 250px; overflow-y: auto; font-family: monospace; font-size: 0.75rem; background: #0f172a; padding: 0.5rem; border-radius: 0.25rem; }
+        .log-entry { margin-bottom: 0.25rem; border-bottom: 1px solid #1e293b; padding-bottom: 0.25rem; }
+        .log-error { color: #ef4444; }
+        .log-success { color: #22c55e; }
+        .log-audio { color: #a78bfa; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Hume EVI</h1>
+        <p>Voice Chat Relay</p>
+        <button id="startButton">Start Conversation</button>
+        <button id="stopButton" disabled>Stop</button>
+        <div class="status" id="status">Ready</div>
+        <div id="logs"></div>
+    </div>
+
+    <script>
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const statusDiv = document.getElementById('status');
+        const logsDiv = document.getElementById('logs');
+
+        let socket = null;
+        let audioContext = null;
+        let processor = null;
+        let inputStream = null;
+        let audioQueue = [];
+        let isPlaying = false;
+
+        function log(msg, type = '') {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry' + (type ? ' log-' + type : '');
+            entry.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logsDiv.prepend(entry);
+            console.log(msg);
+        }
+
+        function setStatus(msg, type = '') {
+            statusDiv.innerText = msg;
+            statusDiv.className = 'status' + (type ? ' ' + type : '');
+        }
+
+        async function start() {
+            try {
+                startButton.disabled = true;
+                setStatus("Requesting microphone...");
+
+                // 1. Check secure context
+                if (!window.isSecureContext) {
+                    throw new Error("Page must be served over HTTPS or localhost for microphone access. Current origin: " + window.location.origin);
+                }
+                log("Secure context: OK", 'success');
+
+                // 2. Check getUserMedia support
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("getUserMedia not supported. Use Chrome/Firefox on localhost or HTTPS.");
+                }
+
+                // 3. Get Microphone
+                inputStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 48000,
+                        autoGainControl: true,
+                        noiseSuppression: true,
+                        echoCancellation: true,
+                    }
+                });
+                log("Microphone access granted", 'success');
+
+                // Check we actually got audio tracks
+                const tracks = inputStream.getAudioTracks();
+                if (tracks.length === 0) {
+                    throw new Error("No audio tracks in stream");
+                }
+                log(`Audio track: ${tracks[0].label} (${tracks[0].readyState})`, 'success');
+
+                // 4. Setup AudioContext
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+                log(`AudioContext: sampleRate=${audioContext.sampleRate}, state=${audioContext.state}`);
+
+                // Resume audioContext if suspended (Chrome autoplay policy)
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                    log("AudioContext resumed", 'success');
+                }
+
+                // 5. Setup WebSocket
+                setStatus("Connecting to server...");
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+                socket.binaryType = "arraybuffer";
+
+                socket.onopen = () => {
+                    setStatus("Connected! Speak now.", 'active');
+                    log("WebSocket connected", 'success');
+                    stopButton.disabled = false;
+                    setupAudioCapture();
+                };
+
+                socket.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+
+                        if (data.type === "audio_output") {
+                            log("Received audio chunk", 'audio');
+                            playAudioChunk(data.data);
+                        } else if (data.type === "user_message") {
+                            const content = data.message?.content || '(no content)';
+                            log(`YOU: ${content}`);
+                        } else if (data.type === "assistant_message") {
+                            const content = data.message?.content || '(no content)';
+                            log(`HUME: ${content}`, 'success');
+                        } else if (data.type === "chat_metadata") {
+                            log(`Chat started (id: ${data.chat_id || 'unknown'})`);
+                        } else if (data.type === "error") {
+                            log(`ERROR: ${data.message}`, 'error');
+                        } else {
+                            log(`Event: ${data.type}`);
+                        }
+                    } catch (e) {
+                        log(`Parse error: ${e.message}`, 'error');
+                    }
+                };
+
+                socket.onerror = (err) => {
+                    log("WebSocket error", 'error');
+                    console.error("WS error:", err);
+                };
+
+                socket.onclose = (event) => {
+                    setStatus("Disconnected", 'error');
+                    log(`WebSocket closed (code: ${event.code}, reason: ${event.reason || 'none'})`, 'error');
+                    cleanup();
+                };
+
+            } catch (err) {
+                console.error(err);
+                setStatus("Error: " + err.message, 'error');
+                log(err.message, 'error');
+                cleanup();
+            }
+        }
+
+        function setupAudioCapture() {
+            const source = audioContext.createMediaStreamSource(inputStream);
+
+            // Use ScriptProcessorNode to capture raw PCM
+            // Buffer size 4096 at 48kHz = ~85ms chunks
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            let chunkCount = 0;
+
+            processor.onaudioprocess = (e) => {
+                if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+                const inputData = e.inputBuffer.getChannelData(0);
+
+                // Check for actual audio signal (not silence)
+                let maxVal = 0;
+                for (let i = 0; i < inputData.length; i++) {
+                    const abs = Math.abs(inputData[i]);
+                    if (abs > maxVal) maxVal = abs;
+                }
+
+                // Convert Float32 [-1, 1] to Int16 [-32768, 32767]
+                const pcmData = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                    pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+
+                // Send raw PCM bytes to server
+                socket.send(pcmData.buffer);
+
+                chunkCount++;
+                if (chunkCount % 50 === 1) {
+                    log(`Sending audio... (chunk #${chunkCount}, peak: ${maxVal.toFixed(4)})`, 'audio');
+                }
+            };
+
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+            log("Audio capture started", 'success');
+        }
+
+        function playAudioChunk(base64Data) {
+            if (!audioContext) return;
+
+            try {
+                // Decode base64 to bytes
+                const binaryStr = atob(base64Data);
+                const bytes = new Uint8Array(binaryStr.length);
+                for (let i = 0; i < binaryStr.length; i++) {
+                    bytes[i] = binaryStr.charCodeAt(i);
+                }
+
+                // Check if this is a WAV file (starts with "RIFF")
+                let pcmBytes;
+                if (bytes.length > 44 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+                    // WAV format - skip 44 byte header to get raw PCM
+                    pcmBytes = bytes.slice(44);
+                    log("Audio chunk: WAV format, extracted PCM", 'audio');
+                } else {
+                    // Raw PCM data
+                    pcmBytes = bytes;
+                }
+
+                // Interpret as Int16 PCM
+                const int16Data = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, Math.floor(pcmBytes.length / 2));
+                const floatData = new Float32Array(int16Data.length);
+                for (let i = 0; i < int16Data.length; i++) {
+                    floatData[i] = int16Data[i] / 32768.0;
+                }
+
+                if (floatData.length === 0) return;
+
+                const buffer = audioContext.createBuffer(1, floatData.length, 48000);
+                buffer.getChannelData(0).set(floatData);
+
+                const source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
+                source.start();
+            } catch (e) {
+                log(`Audio playback error: ${e.message}`, 'error');
+            }
+        }
+
+        function cleanup() {
+            if (inputStream) {
+                inputStream.getTracks().forEach(t => t.stop());
+                inputStream = null;
+            }
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close();
+                audioContext = null;
+            }
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.close();
+            }
+            socket = null;
+            startButton.disabled = false;
+            stopButton.disabled = true;
+        }
+
+        function stop() {
+            log("Stopping conversation...");
+            cleanup();
+            setStatus("Stopped");
+        }
+
+        startButton.onclick = start;
+        stopButton.onclick = stop;
+    </script>
+</body>
+</html>
