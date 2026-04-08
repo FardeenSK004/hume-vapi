@@ -44,6 +44,7 @@
         let inputStream = null;
         let audioQueue = [];
         let isPlaying = false;
+        let nextStartTime = 0;
 
         function log(msg, type = '') {
             const entry = document.createElement('div');
@@ -62,6 +63,7 @@
             try {
                 startButton.disabled = true;
                 setStatus("Requesting microphone...");
+                nextStartTime = 0;
 
                 // 1. Check secure context
                 if (!window.isSecureContext) {
@@ -239,7 +241,14 @@
                 const source = audioContext.createBufferSource();
                 source.buffer = buffer;
                 source.connect(audioContext.destination);
-                source.start();
+                
+                const currentTime = audioContext.currentTime;
+                if (nextStartTime < currentTime) {
+                    nextStartTime = currentTime;
+                }
+                
+                source.start(nextStartTime);
+                nextStartTime += buffer.duration;
             } catch (e) {
                 log(`Audio playback error: ${e.message}`, 'error');
             }
@@ -262,6 +271,7 @@
                 socket.close();
             }
             socket = null;
+            nextStartTime = 0;
             startButton.disabled = false;
             stopButton.disabled = true;
         }
