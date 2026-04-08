@@ -70,6 +70,11 @@ async def websocket_endpoint(websocket: WebSocket, voice: str = None):
         async with client.empathic_voice.chat.connect(
             config_id=active_config
         ) as hume_socket:
+            # Disable keepalive pings to avoid the websockets legacy protocol bug
+            # that causes AssertionError when pings conflict with writes.
+            if hasattr(hume_socket, "_websocket"):
+                hume_socket._websocket.ping_interval = None
+
             print(f"[HUME] Connected to Hume AI (config: {active_config})")
 
             # Send session settings with audio configuration
