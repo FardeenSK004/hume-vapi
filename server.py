@@ -112,7 +112,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             print(f"[BROWSER→HUME] audio chunk #{send_count} ({len(raw_bytes)} bytes)")
 
                 except WebSocketDisconnect:
-                    print("[WS] Browser disconnected")
+                    print("[WS] Browser disconnected ")
                 except Exception as e:
                     print(f"[WS] to_hume error: {e}")
                     import traceback
