@@ -28,18 +28,49 @@ async def get_index(request: Request):
     return templates.TemplateResponse(request, "index.html", {"request": request})
 
 
+def get_voice_map():
+    voice_configs = os.getenv("VOICE_CONFIGS", "")
+    voice_map = {}
+    if voice_configs:
+        # Expected format: "Name1:ID1,Name2:ID2"
+        pairs = voice_configs.split(",")
+        for pair in pairs:
+            if ":" in pair:
+                name, config_id = pair.split(":", 1)
+                voice_map[name.strip().lower()] = config_id.strip()
+    return voice_map
+
+
+@app.get("/voices")
+async def get_voices():
+    voice_map = get_voice_map()
+    return [{"name": name.capitalize(), "key": name} for name in voice_map.keys()]
+
+
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, voice: str = None):
     await websocket.accept()
     print("[WS] Browser connected")
+
+    # Resolve config_id from voice name or fall back to default
+    voice_map = get_voice_map()
+    active_config = HUME_CONFIG_ID
+    
+    if voice:
+        voice_key = voice.strip().lower()
+        if voice_key in voice_map:
+            active_config = voice_map[voice_key]
+            print(f"[WS] Resolved voice '{voice}' to config_id: {active_config}")
+        else:
+            print(f"[WS] Warning: Voice '{voice}' not found in map. Using default.")
 
     client = AsyncHumeClient(api_key=HUME_API_KEY)
 
     try:
         async with client.empathic_voice.chat.connect(
-            config_id=HUME_CONFIG_ID
+            config_id=active_config
         ) as hume_socket:
-            print("[HUME] Connected to Hume AI")
+            print(f"[HUME] Connected to Hume AI (config: {active_config})")
 
             # Send session settings with audio configuration
             audio_config = AudioConfiguration(
@@ -129,6 +160,7 @@ async def websocket_endpoint(websocket: WebSocket):
             for task in pending:
                 task.cancel()
             print(f"[WS] Session ended. Sent {send_count} audio chunks, received {recv_count} events.")
+            print("Session ended successfully")      
 
     except Exception as e:
         print(f"[HUME] Connection failed: {e}")
@@ -148,3 +180,4 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

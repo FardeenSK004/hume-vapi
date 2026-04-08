@@ -12,6 +12,10 @@
         button:disabled { background: #64748b; cursor: not-allowed; }
         #stopButton { background: #ef4444; }
         #stopButton:hover { background: #dc2626; }
+        .voice-select-group { margin: 1rem 0; text-align: left; }
+        .voice-select-group label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.4rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        #voiceSelect { width: 100%; padding: 0.6rem 0.75rem; background: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 0.5rem; font-size: 0.9rem; cursor: pointer; appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.75rem center; }
+        #voiceSelect:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.3); }
         .status { margin-top: 1rem; font-size: 0.875rem; color: #94a3b8; }
         .status.active { color: #22c55e; }
         .status.error { color: #ef4444; }
@@ -26,6 +30,13 @@
     <div class="container">
         <h1>Hume EVI</h1>
         <p>Voice Chat Relay</p>
+        <div class="voice-select-group">
+            <label for="voiceSelect">Select Voice</label>
+            <select id="voiceSelect">
+                <option value="">Select the person whom you wanna talk to</option>
+                <!-- Voices will be loaded dynamically from /voices -->
+            </select>
+        </div>
         <button id="startButton">Start Conversation</button>
         <button id="stopButton" disabled>Stop</button>
         <div class="status" id="status">Ready</div>
@@ -36,6 +47,7 @@
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
         const statusDiv = document.getElementById('status');
+        const voiceSelect = document.getElementById('voiceSelect');
         const logsDiv = document.getElementById('logs');
 
         let socket = null;
@@ -108,7 +120,13 @@
                 // 5. Setup WebSocket
                 setStatus("Connecting to server...");
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+                const selectedVoice = voiceSelect.value;
+                const wsUrl = selectedVoice
+                    ? `${protocol}//${window.location.host}/ws?voice=${encodeURIComponent(selectedVoice)}`
+                    : `${protocol}//${window.location.host}/ws`;
+                socket = new WebSocket(wsUrl);
+                log(`Using voice: ${selectedVoice || 'default (.env)'}`);
+                voiceSelect.disabled = true;
                 socket.binaryType = "arraybuffer";
 
                 socket.onopen = () => {
@@ -274,6 +292,7 @@
             nextStartTime = 0;
             startButton.disabled = false;
             stopButton.disabled = true;
+            voiceSelect.disabled = false;
         }
 
         function stop() {
@@ -281,6 +300,24 @@
             cleanup();
             setStatus("Stopped");
         }
+
+        async function loadVoices() {
+            try {
+                const response = await fetch('/voices');
+                const voices = await response.json();
+                voices.forEach(voice => {
+                    const option = document.createElement('option');
+                    option.value = voice.key;
+                    option.textContent = voice.name;
+                    voiceSelect.appendChild(option);
+                });
+                log(`Loaded ${voices.length} voices from server`);
+            } catch (err) {
+                log(`Failed to load voices: ${err.message}`, 'error');
+            }
+        }
+
+        loadVoices();
 
         startButton.onclick = start;
         stopButton.onclick = stop;
